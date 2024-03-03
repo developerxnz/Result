@@ -1,0 +1,326 @@
+#!meta
+
+{"kernelInfo":{"defaultKernelName":"csharp","items":[{"aliases":[],"languageName":"csharp","name":"csharp"}]}}
+
+#!markdown
+
+# Using Exceptions for flow control
+
+## Exceptions for flow control: why not?
+Generally, code is read more often than written. Most of the best practices aim to simplify understanding and reasoning about the code: the simpler code, the fewer bugs it contains, and the easier it becomes to maintain the software.
+
+The use of exceptions for program flow control hides the programmer’s intention, that is why it is considered a bad practice.
+
+Heard of the following?
+[Link][Principal Of Least Astonishment]
+>A component of a system should behave in a way that most users will expect it to behave, and therefore not astonish or surprise users.
+
+## Use Cases for Exceptions
+The use case that exceptions were designed for is "I just encountered a situation that I cannot deal with properly at this point, because I don't have enough context to handle it, but the routine that called me (or something further up the call stack) ought to know how to handle it."
+
+The secondary use case is "I just encountered a serious error, and right now getting out of this control flow to prevent data corruption or other damage is more important than trying to continue onward."
+
+## Exception Handlers
+Generic Exception handling can hide potentential issues
+
+### Example
+```
+public bool DoSomething()
+{
+    try
+    {
+        externalApi.DoSomething();
+        return true;
+    }
+    catch(Exception e)
+    {
+        return false;
+    }
+}
+```
+
+## Looking at our code
+
+### Examples of Exception confrol flow from our code
+
+#### Example 1
+```
+private static void ValidateDecimalCurrencyType(GeneralQuestionStep step, string answer)...
+```
+
+With Example 1 based on the signature, what are we expecting to happen?
+
+#### Example 2
+```
+private async Task<ActivityRoot> GetActivity(ActivityId activityId, PartnerId partnerId, AccountId accountId, CancellationToken cancellationToken)...
+```
+
+With Example 2 based on the signature, what are we expecting to happen?
+
+#### Example 3
+```
+public async Task<GetCustomerPointsResponseDto> HandleAsync(GetCustomerPointsRequestDto query, CancellationToken cancellationToken)
+```
+With Example 3 based on the signature, what are we expecting to happen?
+
+#!markdown
+
+# Introducting the Result
+Obviously we are already familiar to this due to our work with f#.
+
+By using a Result type, reading code will make more sense. We know its intention.
+
+## Result type Libraries
+
+There are many libriries that have been built to provide this functionality.
+- OneOf
+- Fluent Results
+- ErrorOr
+
+## ErrorOr
+The library of chosen to use is ErrorOr. The reason is because this library is basically a combination of OneOf and Fluent Result. Bascially takinug the best from both of the libraries and adding more functionality to make it easier to use.
+
+### Error Types
+- Failure,
+- Unexpected,
+- Validation,
+- Conflict,
+- NotFound
+- Unauthorized,
+- Forbidden,
+
+You can extend the error types by using Error.Customer
+```
+public static class MyErrorTypes
+{
+    const int ShouldNeverHappen = 12;
+}
+
+var error = Error.Custom(
+    type: MyErrorTypes.ShouldNeverHappen,
+    code: "User.ShouldNeverHappen",
+    description: "A user error that should never happen");
+```
+
+### Other built in functionality
+Switch
+- The Switch method receives two actions, onValue and onError, onValue will be invoked if the result is success, and onError is invoked if the result is an error.
+
+Match
+- The Match method receives two functions, onValue and onError, onValue will be invoked if the result is success, and onError is invoked if the result is an error.
+
+Then
+- Then receives an action or a function, and invokes it only if the result is not an error.
+
+Else
+- Else receives a value or a function. If the result is an error, Else will return the value or invoke the function. Otherwise, it will return the value of the result.
+
+## Points to take away
+- Throw an exception to state an unexpected situation in your software.
+- Use return values for input validation.
+- If you know how to deal with exceptions a library throws, catch them at the lowest level possible.
+- If you have an unexpected exception, discard current operation completely. Don’t pretend you know how to deal with them.
+
+#!markdown
+
+# Example 1, throwing exception and handling via try catch
+
+#!csharp
+
+public float Divide(int a, int b)
+{
+    if (b == 0)
+    {
+        throw new Exception("Cannot divide by zero");
+    }
+
+    return a / b;
+}
+
+try
+{
+    var result = Divide(4, 0);
+    Console.WriteLine(result * 2); // 4
+}
+catch (Exception e)
+{
+    Console.WriteLine(e.Message);
+    return;
+}
+
+#!markdown
+
+# Updated to use ErrorOr
+
+#!csharp
+
+#i "nuget:https://api.nuget.org/v3/index.json"
+
+#r "nuget:ErrorOr"
+
+using ErrorOr;
+
+public static class Errors 
+{
+    public static Error DivideByZero => Error.Conflict("DivdeError.DivideByZero", "Cannot divide by zero");
+}
+
+public ErrorOr<float> Divide(int a, int b)
+{
+    if (b == 0)
+    {
+        return Errors.DivideByZero;
+    }
+
+    return a / b;
+}
+
+var result = Divide(4, 0);
+
+if (result.IsError)
+{
+    Console.WriteLine(result.FirstError.Description);
+    return;
+}
+
+Console.WriteLine(result.Value * 2); // 4
+
+#!markdown
+
+# Example 2 Updated to user ErrorOr
+
+#!csharp
+
+#i "nuget:https://api.nuget.org/v3/index.json"
+
+#r "nuget:ErrorOr"
+
+using ErrorOr;
+
+public record GeneralQuestionStep(string? MinimumValue, string? MaximumValue);      
+
+public ErrorOr<bool> IsValidateDecimalCurrencyType(GeneralQuestionStep step, string answer)
+{
+    if (!decimal.TryParse(answer, out decimal value))
+    {
+        return Error.Unexpected("code", $"{answer} is not a valid number.");
+    }
+
+    decimal? minValue = step.MinimumValue is null ? null : decimal.Parse(step.MinimumValue);
+    decimal? maxValue = step.MaximumValue is null ? null : decimal.Parse(step.MaximumValue);
+
+    if (minValue.HasValue && value < minValue)
+    {
+        return Error.Validation("code", $"Answer is less than the allowed minimum of ${step.MinimumValue!}");
+    }
+
+    if (maxValue.HasValue && value > maxValue)
+    {
+        return Error.Validation("code", $"Answer is more than the allowed maximum of ${step.MaximumValue}");
+    
+    return true;
+}
+
+var x = new GeneralQuestionStep("100", "200");
+var result = IsValidateDecimalCurrencyType(x, "m");
+if(result.IsError)
+{
+    Console.WriteLine($"Woops!, Error: {result.FirstError.Description}");
+}
+else
+{
+    Console.WriteLine("We are valid");
+}
+
+#!markdown
+
+### Resources
+[ErrorOr](https://github.com/amantinband/error-or)
+
+[OneOf](https://github.com/mcintyre321/OneOf/tree/master/OneOf)
+
+[Fluent Validation](https://github.com/altmann/FluentResults)
+
+[Principal Of Least Astonishment](https://en.wikipedia.org/wiki/Principle_of_least_astonishment)
+
+[Flow Control | ASP.NET 6 REST API Following CLEAN ARCHITECTURE & DDD Tutorial | Part 5](https://www.youtube.com/watch?v=tZ8gGqiq_IU&t=16s)
+
+#### Reference
+[exceptions for flow control](https://enterprisecraftsmanship.com/posts/exceptions-for-flow-control/)
+
+#!markdown
+
+# Reference Material
+# Examples
+
+## Example 1
+
+```
+private static void ValidateDecimalCurrencyType(GeneralQuestionStep step, string answer)
+{
+    if (!decimal.TryParse(answer, out decimal value))
+    {
+        throw new CommandValidationException("Answer is not a valid number.");
+    }
+
+    decimal? minValue = step.MinimumValue is null ? null : decimal.Parse(step.MinimumValue!.Value);
+    decimal? maxValue = step.MaximumValue is null ? null : decimal.Parse(step.MaximumValue!.Value);
+
+    if (minValue.HasValue && value < minValue)
+    {
+        throw new CommandValidationException($"Answer is less than the allowed minimum of ${step.MinimumValue!.Value}");
+    }
+
+    if (maxValue.HasValue && value > maxValue)
+    {
+        throw new CommandValidationException($"Answer is more than the allowed maximum of ${step.MaximumValue!.Value}");
+    }
+}
+```
+
+## Example 2
+```
+private async Task<ActivityRoot> GetActivity(ActivityId activityId, PartnerId partnerId, AccountId accountId, CancellationToken cancellationToken)
+{
+    var aggregate = await _activityDataStore.GetAsync(
+        new ActivityPartitionKey(activityId), new ActivityAggregateId(activityId), cancellationToken);
+
+    if (aggregate is null)
+    {
+        throw new ActivityNotFoundException($"Activity not found. ActivityId:{activityId.Value}");
+    }
+
+    var (activity, _) = aggregate.Value.Aggregate;
+
+    if (activity is AssessmentActivity assessmentActivity)
+    {
+        AssessmentConfigurationRequest configurationRequest = new(partnerId, accountId);
+        AssessmentConfigRoot configuration = await _assessmentConfigurationService.GetAsync(configurationRequest, cancellationToken);
+        if (!assessmentActivity.TagsEnabled(configuration))
+        {
+            throw new
+                DtoValidationException($"At least one of the Assessment tags [{string.Join(',', assessmentActivity.ConfigurationTags)}] for Activity {activityId.Value} is disabled.");
+        }
+    }
+
+    return aggregate.Value.Aggregate.Data;
+}
+```
+
+## Example 3
+```
+public async Task<GetCustomerPointsResponseDto> HandleAsync(GetCustomerPointsRequestDto query, CancellationToken cancellationToken)
+	{
+		var partitionKey = new CustomerPointsPartitionKey(query.CustomerId);
+		var aggregateId = new CustomerPointsAggregateId(query.CustomerId);
+
+		(Aggregate<CustomerPointsRoot, CustomerPointsMetadata> Aggregate, ETag ETag)? aggregate = await _eventStore.GetAsync(partitionKey, aggregateId, cancellationToken);
+		if (aggregate is not null)
+		{
+			var (points, timestamp) = aggregate.Value.Aggregate.Data;
+			return new GetCustomerPointsResponseDto(points.Value, timestamp);
+		}
+
+		return new GetCustomerPointsResponseDto(0, DateTime.UtcNow);
+	}
+```
