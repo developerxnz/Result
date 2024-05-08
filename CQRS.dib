@@ -1,0 +1,208 @@
+#!meta
+
+{"kernelInfo":{"defaultKernelName":"csharp","items":[{"aliases":[],"languageName":"csharp","name":"csharp"}]}}
+
+#!csharp
+
+ 
+using System;
+
+public record CustomerId(string Value): NonEmptyString(Value)
+{
+    public static implicit operator CustomerId(string d) => new CustomerId(d);
+}
+
+string t = "boom!";
+
+CustomerId f = t;
+Console.WriteLine(f);  // output: boom!
+
+public record NonEmptyString
+{
+    public readonly string Value;
+
+    public NonEmptyString(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            throw new ArgumentOutOfRangeException(nameof(Value), "Digit cannot be greater than nine.");
+        }
+        this.Value = value;
+    }
+
+    public static implicit operator NonEmptyString(string d) => new NonEmptyString(d);
+    public static implicit operator string(NonEmptyString d) => d.Value;
+    //public static explicit operator NonEmptyString(string b) => new NonEmptyString(b);
+
+    public override string ToString() => $"{Value}";
+}
+
+public record Digit
+{
+    private readonly NonEmptyString digit;
+
+    public Digit(NonEmptyString digit)
+    {
+        if (string.IsNullOrWhiteSpace(digit.Value))
+        {
+            throw new ArgumentOutOfRangeException(nameof(digit), "Digit cannot be greater than nine.");
+        }
+        this.digit = digit;
+    }
+
+    public static implicit operator NonEmptyString(Digit d) => d.digit;
+    public static explicit operator Digit(NonEmptyString b) => new Digit(b);
+
+    public override string ToString() => $"{digit}";
+}
+
+var d = new Digit(new NonEmptyString("7"));
+
+NonEmptyString z = t;
+
+NonEmptyString number = d;
+Console.WriteLine(number);  // output: 7
+
+Digit digit = (Digit)number;
+Console.WriteLine(digit);  // output: 7
+
+#!csharp
+
+public interface ICommand {}
+
+public interface IAggregate {}
+public sealed record MobileNumber(string Value);
+
+public record UserAggregate(MobileNumber MobileNumber, bool IsLinked) : IAggregate;
+
+public interface IEvent<TAggregate> where TAggregate: IAggregate  {
+    TAggregate Apply(TAggregate aggregate);
+}
+
+public interface ICreatedEvent<TAggregate> where TAggregate: IAggregate 
+{
+    TAggregate Apply();
+}
+
+public interface IEventApplicator<TAggregate> where TAggregate: IAggregate 
+{
+    (TAggregate, IEnumerable<IEvent<TAggregate>>) Apply(ICreatedEvent<UserAggregate> createEvent, IEnumerable<IEvent<TAggregate>> events);
+
+    (TAggregate, IEnumerable<IEvent<TAggregate>>) Apply(TAggregate aggreage, IEnumerable<IEvent<TAggregate>> events);
+}
+
+public sealed class UserEventApplicator: IEventApplicator<UserAggregate>
+{
+    public (UserAggregate, IEnumerable<IEvent<UserAggregate>>) Apply(ICreatedEvent<UserAggregate> createEvent, IEnumerable<IEvent<UserAggregate>> events)
+    {
+        UserAggregate aggregate = createEvent.Apply();
+        events.Aggregate(aggregate, (aggregate, @event) => @event.Apply(aggregate));
+
+        return (aggregate, events);
+    }
+
+    public (UserAggregate, IEnumerable<IEvent<UserAggregate>>) Apply(UserAggregate aggregate, IEnumerable<IEvent<UserAggregate>> events)
+    {
+        events.Aggregate(aggregate, (aggregate, @event) => @event.Apply(aggregate));   
+
+        return (aggregate, events);
+    }
+}
+
+public interface IEventStore {
+
+    Task SaveAsync(IAggregate aggregate, IEnumerable<IEvent> events);
+
+}
+
+public abstract class UserBaseCommandHandler
+{
+    private readonly IEventApplicator _applicator;
+    private readonly IEventStore _eventStore;
+
+    protected UserBaseCommandHandler(IEventApplicator applicator, IEventStore eventStore)
+    {
+        _applicator = applicator;
+        _eventStore = eventStore;
+    }
+
+    public abstract Task HandleAsync(ICommand command);
+
+    protected async Task SaveAsync(ICreatedEvent created, IEnumerable<IEvent> events)
+    {
+        var (updatedAggregate, updatedEvents) = _applicator.Apply(created, events);
+
+        await _eventStore.SaveAsync(updatedAggregate, updatedEvents);
+    }
+
+    protected async Task SaveAsync(IAggregate aggregate, IEnumerable<IEvent> events)
+    {
+        var (updatedAggregate, updatedEvents) = _applicator.Apply(aggregate, events);
+
+        await _eventStore.SaveAsync(updatedAggregate, updatedEvents);
+    }
+
+}
+
+public sealed record UserCreatedEvent(MobileNumber MobileNumber) : ICreatedEvent<UserAggregate>
+{
+    public UserAggregate Apply()
+    {
+        return new UserAggregate(MobileNumber, false);
+    }
+}
+
+public sealed record UserLinkedEvent() : IEvent<UserAggregate>
+{
+    public UserAggregate Apply(UserAggregate aggregate)
+    {
+        return aggregate with { IsLinked = true };
+    }
+}
+
+public sealed record MobileNumberChangedEvent(MobileNumber MobileNumber) : IEvent<UserAggregate>
+{
+    public UserAggregate Apply(UserAggregate aggregate)
+    {
+        return aggregate with { MobileNumber = MobileNumber };
+    }
+}
+
+public sealed class SignupUserCommandHandler : UserBaseCommandHandler
+{
+    public SignupUserCommandHandler(IEventApplicator applicator, IEventStore eventStore): base(applicator, eventStore) {}
+
+    public async override Task HandleAsync(ICommand command)
+    {
+        // 1. Validate Business Logic
+        // 2. Create events
+        IEnumerable<IEvent> events = new List<IEvent>()
+        {
+            new UserLinkedEvent()
+        };
+        // 3. Save Aggregate and Events
+
+        await SaveAsync(new UserCreatedEvent(), events);
+    }
+}
+
+
+public sealed class UpdateMobileNumberCommandHandler : UserBaseCommandHandler
+{
+    public UpdateMobileNumberCommandHandler(IEventApplicator applicator, IEventStore eventStore): base(applicator, eventStore) {}
+
+    public async override Task HandleAsync(ICommand command)
+    {
+        // 1. Get Aggregate
+         var aggregate = new UserAggregate {  IsLinked = false, MobileNumber = new MobileNumber("+64") };
+        // 2. Validate Business Logic
+        // 3. Create events
+        IEnumerable<IEvent> events = new List<IEvent>()
+        {
+            new MobileNumberChangedEvent()
+        };
+        // 4. Save Aggregate and Events
+
+        await SaveAsync(aggregate, events);
+    }
+}
