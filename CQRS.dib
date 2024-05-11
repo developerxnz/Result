@@ -58,7 +58,7 @@ public record Digit
 
 var d = new Digit(new NonEmptyString("7"));
 
-NonEmptyString z = t;
+NonEmptyString z = t; //string to nonempty string with out constructing explicitly
 
 NonEmptyString number = d;
 Console.WriteLine(number);  // output: 7
@@ -68,12 +68,61 @@ Console.WriteLine(digit);  // output: 7
 
 #!csharp
 
-public interface ICommand {}
+#nullable enable
+using System.Linq.Expressions;
+
+public interface ICommand {
+
+    CausationId CausationId { get; } 
+    
+    CorrelationId CorrelationId { get; }
+}
+
+public abstract record PartitionKey(string Value);
+
+public sealed record CausationId(string Value);
+
+public sealed record CorrelationId(string Value);
+
+public abstract record Command(CausationId CausationId, CorrelationId CorrelationId);
 
 public interface IAggregate {}
+
 public sealed record MobileNumber(string Value);
 
-public record UserAggregate(MobileNumber MobileNumber, bool IsLinked) : IAggregate;
+public abstract record ExternalId(string Value);
+
+public abstract record Provider(string Value);
+
+public sealed record FirebaseProvider(): Provider("Firebase");
+
+public sealed record UnknownExternalId(): ExternalId("Unknow"); 
+
+public abstract record Id (string Value);
+
+public sealed record UserPartitionKey(MobileNumber MobileNumber): PartitionKey(MobileNumber.Value);
+
+public sealed record UserId(MobileNumber MobileNumber): Id(MobileNumber.Value);
+
+public sealed record NullInstanceAggregate : IAggregate;
+
+public sealed record DeviceId(string Value);
+
+public sealed record VerificationId(string Value);
+
+public sealed record UserAggregate(
+    ExternalId ExternalId,
+    Provider Provider,
+    MobileNumber MobileNumber, 
+    bool IsLinked, 
+    DateTime LastSignInRequested,
+    DateTime LastSuccessfulSignIn,
+    int SignInAttempts,
+    DateTime LastFailedSignInAttempt,
+    int FailedSignInAttempts,
+    bool Disabled,
+    bool Locked
+) : IAggregate;
 
 public interface IEvent<TAggregate> where TAggregate: IAggregate  {
     TAggregate Apply(TAggregate aggregate);
@@ -88,7 +137,7 @@ public interface IEventApplicator<TAggregate> where TAggregate: IAggregate
 {
     (TAggregate, IEnumerable<IEvent<TAggregate>>) Apply(ICreatedEvent<UserAggregate> createEvent, IEnumerable<IEvent<TAggregate>> events);
 
-    (TAggregate, IEnumerable<IEvent<TAggregate>>) Apply(TAggregate aggreage, IEnumerable<IEvent<TAggregate>> events);
+    (TAggregate, IEnumerable<IEvent<TAggregate>>) Apply(TAggregate aggregate, IEnumerable<IEvent<TAggregate>> events);
 }
 
 public sealed class UserEventApplicator: IEventApplicator<UserAggregate>
@@ -109,37 +158,85 @@ public sealed class UserEventApplicator: IEventApplicator<UserAggregate>
     }
 }
 
-public interface IEventStore {
-
-    Task SaveAsync(IAggregate aggregate, IEnumerable<IEvent> events);
-
+public interface IEventStore<TAggregate> where TAggregate : IAggregate 
+{
+    Task SaveAsync(IAggregate aggregate, IEnumerable<IEvent<TAggregate>> events);
 }
 
-public abstract class UserBaseCommandHandler
+public interface ICommandHandler<TCommand> where TCommand: ICommand
 {
-    private readonly IEventApplicator _applicator;
-    private readonly IEventStore _eventStore;
+    Task HandleAsync(TCommand command);
+}
 
-    protected UserBaseCommandHandler(IEventApplicator applicator, IEventStore eventStore)
+public interface IReaderAggregateRepository<TAggregate, TPartitionKey, TId> 
+where TAggregate : IAggregate 
+where TPartitionKey : PartitionKey
+where TId : Id
+{
+    Task<TAggregate> GetAsync(TPartitionKey partitionKey, TId Id);
+
+    Task<IEnumerable<TAggregate>> GetAsync(TPartitionKey partitionKey);
+}
+
+public interface ICreateAggregateRepository<TAggregate> where TAggregate : IAggregate
+{
+    Task SaveAsync(ICreatedEvent<TAggregate> created, IEnumerable<IEvent<TAggregate>> events);
+}
+
+public interface IUpdateAggregateRepository<TAggregate> where TAggregate : IAggregate
+{
+    Task SaveAsync(TAggregate aggregate, IEnumerable<IEvent<TAggregate>> events);
+}
+
+public class UserService: 
+    ICreateAggregateRepository<UserAggregate>,
+    IUpdateAggregateRepository<UserAggregate>,
+    IReaderAggregateRepository<UserAggregate, UserPartitionKey, UserId>
+{
+    private readonly IEventApplicator<UserAggregate> _applicator;
+    private readonly IEventStore<UserAggregate> _eventStore;
+
+    protected UserService(IEventApplicator<UserAggregate> applicator, IEventStore<UserAggregate> eventStore)
     {
         _applicator = applicator;
         _eventStore = eventStore;
     }
-
-    public abstract Task HandleAsync(ICommand command);
-
-    protected async Task SaveAsync(ICreatedEvent created, IEnumerable<IEvent> events)
+    
+    public Task<UserAggregate> GetAsync(UserPartitionKey partitionKey, UserId Id)
     {
-        var (updatedAggregate, updatedEvents) = _applicator.Apply(created, events);
+        var aggregate = new UserAggregate(
+            new UnknownExternalId(),
+            new FirebaseProvider(),
+            new MobileNumber("+61"), 
+            false, 
+            DateTime.UtcNow.AddDays(-10),
+            DateTime.MinValue,
+            0,
+            DateTime.MinValue,
+            0,
+            false,
+            false);
 
-        await _eventStore.SaveAsync(updatedAggregate, updatedEvents);
+        return Task.FromResult<UserAggregate>(aggregate);
     }
 
-    protected async Task SaveAsync(IAggregate aggregate, IEnumerable<IEvent> events)
+    public Task<IEnumerable<UserAggregate>> GetAsync(UserPartitionKey partitionKey)
+    {
+        return Task.FromResult<IEnumerable<UserAggregate>>(Enumerable.Empty<UserAggregate>());
+    }
+
+    public async Task SaveAsync(UserAggregate aggregate, IEnumerable<IEvent<UserAggregate>> events)
     {
         var (updatedAggregate, updatedEvents) = _applicator.Apply(aggregate, events);
 
         await _eventStore.SaveAsync(updatedAggregate, updatedEvents);
+    }
+
+    public async Task SaveAsync(ICreatedEvent<UserAggregate> created, IEnumerable<IEvent<UserAggregate>> events)
+    {
+        var (aggregate, updatedEvents) = _applicator.Apply(created, events);
+
+        await _eventStore.SaveAsync(aggregate, updatedEvents);
     }
 
 }
@@ -148,7 +245,18 @@ public sealed record UserCreatedEvent(MobileNumber MobileNumber) : ICreatedEvent
 {
     public UserAggregate Apply()
     {
-        return new UserAggregate(MobileNumber, false);
+        return new UserAggregate(
+            new UnknownExternalId(),
+            new FirebaseProvider(),
+            MobileNumber, 
+            false, 
+            DateTime.MinValue,
+            DateTime.MinValue,
+            0,
+            DateTime.MinValue,
+            0,
+            false,
+            false);
     }
 }
 
@@ -168,41 +276,200 @@ public sealed record MobileNumberChangedEvent(MobileNumber MobileNumber) : IEven
     }
 }
 
-public sealed class SignupUserCommandHandler : UserBaseCommandHandler
-{
-    public SignupUserCommandHandler(IEventApplicator applicator, IEventStore eventStore): base(applicator, eventStore) {}
+public sealed record SignUpUserCommand(CausationId CausationId, CorrelationId CorrelationId, MobileNumber MobileNumber) 
+: Command (CausationId, CorrelationId), ICommand;
 
-    public async override Task HandleAsync(ICommand command)
+public sealed class SignUpUserCommandHandler : ICommandHandler<SignUpUserCommand>
+{
+    private readonly ICreateAggregateRepository<UserAggregate> _aggregateService;
+    private readonly IReaderAggregateRepository<UserAggregate, UserPartitionKey, UserId> _readerRepository;
+
+    public SignUpUserCommandHandler(
+        ICreateAggregateRepository<UserAggregate> aggregateService,
+        IReaderAggregateRepository<UserAggregate, UserPartitionKey, UserId> readerRepository)
+    {
+        _aggregateService = aggregateService;
+        _readerRepository = readerRepository;
+    }
+
+    public async Task HandleAsync(SignUpUserCommand command)
     {
         // 1. Validate Business Logic
-        // 2. Create events
-        IEnumerable<IEvent> events = new List<IEvent>()
-        {
-            new UserLinkedEvent()
-        };
-        // 3. Save Aggregate and Events
+        UserPartitionKey userPartitionKey = new(command.MobileNumber);
+        UserId userId = new (command.MobileNumber);
 
-        await SaveAsync(new UserCreatedEvent(), events);
+        IAggregate aggregate = await _readerRepository.GetAsync(userPartitionKey, userId);
+        
+        switch(aggregate)
+        {
+            case NullInstanceAggregate:
+                Console.WriteLine("Null Instance");
+                break;
+            case UserAggregate user:
+                await _aggregateService.SaveAsync(new UserCreatedEvent(command.MobileNumber), new [] {
+                    new UserLinkedEvent()
+                });
+                break;
+            default:
+                throw new InvalidOperationException();
+        };
+    }
+}
+
+public sealed record SignInUserCommand(CausationId CausationId, CorrelationId CorrelationId, MobileNumber MobileNumber, DeviceId DeviceId) 
+    : Command (CausationId, CorrelationId), ICommand;
+
+public sealed record UserSignedInRequestedEvent(DateTime SignInRequestedUtc, DeviceId DeviceId) : IEvent<UserAggregate>
+{
+    public UserAggregate Apply(UserAggregate aggregate)
+    {
+        return aggregate with { LastSignInRequested = SignInRequestedUtc };
+    }
+}
+
+public sealed class SignInCommandHandler : ICommandHandler<SignInUserCommand>
+{
+    private readonly IUpdateAggregateRepository<UserAggregate> _aggregateService;
+    private readonly IReaderAggregateRepository<UserAggregate, UserPartitionKey, UserId> _readerRepository;
+
+    public SignInCommandHandler(
+        IUpdateAggregateRepository<UserAggregate> aggregateService,
+        IReaderAggregateRepository<UserAggregate, UserPartitionKey, UserId> readerRepository)
+    {
+        _aggregateService = aggregateService;
+        _readerRepository = readerRepository;
+    }
+
+    public async Task HandleAsync(SignInUserCommand command)
+    {
+        UserPartitionKey userPartitionKey = new(command.MobileNumber);
+        UserId userId = new (command.MobileNumber);
+
+        IAggregate aggregate = await _readerRepository.GetAsync(userPartitionKey, userId);
+
+        switch(aggregate)
+        {
+            case UserAggregate userAggregate:
+                await _aggregateService.SaveAsync(userAggregate, new [] {
+                    new UserSignedInRequestedEvent(DateTime.UtcNow, command.DeviceId)
+                });
+                break;
+            default:
+                throw new InvalidOperationException();
+        }
+    }
+}
+
+public sealed record VerifySignInCommand(CausationId CausationId, CorrelationId CorrelationId, MobileNumber MobileNumber, VerificationId VerificationId, DeviceId DeviceId) 
+    : Command (CausationId, CorrelationId), ICommand;
+
+public sealed record VerifySignInRequestedEvent(DeviceId DeviceId, VerificationId VerificationId) : IEvent<UserAggregate>
+{
+    public UserAggregate Apply(UserAggregate aggregate)
+    {
+        return aggregate;
+    }
+}
+
+public sealed record SuccessfulSignInEvent(DeviceId DeviceId, VerificationId VerificationId, DateTime AttemptDateTimeUtc) : IEvent<UserAggregate>
+{
+    public UserAggregate Apply(UserAggregate aggregate)
+    {
+        return aggregate with { 
+            FailedSignInAttempts = 0, 
+            LastFailedSignInAttempt = DateTime.MinValue, 
+            SignInAttempts = 0,
+            LastSuccessfulSignIn =  AttemptDateTimeUtc
+        };
+    }
+}
+
+public sealed record FailedSignInEvent(DeviceId DeviceId, VerificationId VerificationId, DateTime AttemptDateTimeUtc) : IEvent<UserAggregate>
+{
+    public UserAggregate Apply(UserAggregate aggregate)
+    {
+        return aggregate with {  FailedSignInAttempts = aggregate.FailedSignInAttempts+1, LastFailedSignInAttempt = AttemptDateTimeUtc };
+    }
+}
+
+public sealed record UserLockedEvent() : IEvent<UserAggregate>
+{
+    public UserAggregate Apply(UserAggregate aggregate)
+    {
+        return aggregate with { Locked = true };
+    }
+}
+
+public sealed class VerifySignInCommandHandler : ICommandHandler<VerifySignInCommand>
+{
+    private readonly IUpdateAggregateRepository<UserAggregate> _aggregateService;
+    private readonly IReaderAggregateRepository<UserAggregate, UserPartitionKey, UserId> _readerRepository;
+
+    public VerifySignInCommandHandler(
+        IUpdateAggregateRepository<UserAggregate> aggregateService,
+        IReaderAggregateRepository<UserAggregate, UserPartitionKey, UserId> readerRepository)
+    {
+        _aggregateService = aggregateService;
+        _readerRepository = readerRepository;
+    }
+
+    public async Task HandleAsync(VerifySignInCommand command)
+    {
+        UserPartitionKey userPartitionKey = new(command.MobileNumber);
+        UserId userId = new (command.MobileNumber);
+        IAggregate aggregate = await _readerRepository.GetAsync(userPartitionKey, userId);
+
+        switch(aggregate)
+        {
+            case UserAggregate userAggregate:
+                await _aggregateService.SaveAsync(userAggregate, new List<IEvent<UserAggregate>> {
+                    //Success
+                    new SuccessfulSignInEvent(command.DeviceId, command.VerificationId, DateTime.UtcNow),
+
+                    //Failure
+                    new FailedSignInEvent(command.DeviceId, command.VerificationId, DateTime.UtcNow),
+                    new UserLockedEvent()
+                });
+                break;
+            default:
+                throw new InvalidOperationException();
+        }
     }
 }
 
 
-public sealed class UpdateMobileNumberCommandHandler : UserBaseCommandHandler
+public sealed record UpdateMobileNumberCommand(CausationId CausationId, CorrelationId CorrelationId, MobileNumber MobileNumber)
+    : Command (CausationId, CorrelationId), ICommand;;
+
+
+public sealed class UpdateMobileNumberCommandHandler : ICommandHandler<UpdateMobileNumberCommand>
 {
-    public UpdateMobileNumberCommandHandler(IEventApplicator applicator, IEventStore eventStore): base(applicator, eventStore) {}
+    private readonly IUpdateAggregateRepository<UserAggregate> _aggregateService;
+    private readonly IReaderAggregateRepository<UserAggregate, UserPartitionKey, UserId> _readerRepository;
 
-    public async override Task HandleAsync(ICommand command)
+    public UpdateMobileNumberCommandHandler(
+        IUpdateAggregateRepository<UserAggregate> aggregateService,
+        IReaderAggregateRepository<UserAggregate, UserPartitionKey, UserId> readerRepository)
     {
-        // 1. Get Aggregate
-         var aggregate = new UserAggregate {  IsLinked = false, MobileNumber = new MobileNumber("+64") };
-        // 2. Validate Business Logic
-        // 3. Create events
-        IEnumerable<IEvent> events = new List<IEvent>()
-        {
-            new MobileNumberChangedEvent()
-        };
-        // 4. Save Aggregate and Events
+        _aggregateService = aggregateService;
+         _readerRepository = readerRepository;
+    }
 
-        await SaveAsync(aggregate, events);
+    public async Task HandleAsync(UpdateMobileNumberCommand command)
+    {
+        UserPartitionKey userPartitionKey = new(command.MobileNumber);
+        UserId userId = new (command.MobileNumber);
+        IAggregate aggregate = await _readerRepository.GetAsync(userPartitionKey, userId);
+
+        switch(aggregate)
+        {
+            case UserAggregate userAggregate:
+                await _aggregateService.SaveAsync(userAggregate, new List<IEvent<UserAggregate>> {
+                    new MobileNumberChangedEvent(command.MobileNumber)
+                });
+                break;
+            default:
+                throw new InvalidOperationException();
+        }
     }
 }
