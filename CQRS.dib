@@ -110,6 +110,8 @@ public sealed record DeviceId(string Value);
 
 public sealed record VerificationId(string Value);
 
+public sealed record VerficationCode(string value);
+
 public sealed record UserAggregate(
     ExternalId ExternalId,
     Provider Provider,
@@ -168,7 +170,14 @@ public interface ICommandHandler<TCommand> where TCommand: ICommand
     Task HandleAsync(TCommand command);
 }
 
-public interface IReaderAggregateRepository<TAggregate, TPartitionKey, TId> 
+public interface ICommandHandler<TCommand, TResponse> 
+    where TCommand: ICommand
+    where TResponse: class
+{
+    Task<TResponse> HandleAsync(TCommand command);
+}
+
+public interface IReadAggregate<TAggregate, TPartitionKey, TId> 
 where TAggregate : IAggregate 
 where TPartitionKey : PartitionKey
 where TId : Id
@@ -178,20 +187,20 @@ where TId : Id
     Task<IEnumerable<TAggregate>> GetAsync(TPartitionKey partitionKey);
 }
 
-public interface ICreateAggregateRepository<TAggregate> where TAggregate : IAggregate
+public interface ICreateAggregate<TAggregate> where TAggregate : IAggregate
 {
     Task SaveAsync(ICreatedEvent<TAggregate> created, IEnumerable<IEvent<TAggregate>> events);
 }
 
-public interface IUpdateAggregateRepository<TAggregate> where TAggregate : IAggregate
+public interface IUpdateAggregate<TAggregate> where TAggregate : IAggregate
 {
     Task SaveAsync(TAggregate aggregate, IEnumerable<IEvent<TAggregate>> events);
 }
 
 public class UserService: 
-    ICreateAggregateRepository<UserAggregate>,
-    IUpdateAggregateRepository<UserAggregate>,
-    IReaderAggregateRepository<UserAggregate, UserPartitionKey, UserId>
+    ICreateAggregate<UserAggregate>,
+    IUpdateAggregate<UserAggregate>,
+    IReadAggregate<UserAggregate, UserPartitionKey, UserId>
 {
     private readonly IEventApplicator<UserAggregate> _applicator;
     private readonly IEventStore<UserAggregate> _eventStore;
@@ -277,16 +286,16 @@ public sealed record MobileNumberChangedEvent(MobileNumber MobileNumber) : IEven
 }
 
 public sealed record SignUpUserCommand(CausationId CausationId, CorrelationId CorrelationId, MobileNumber MobileNumber) 
-: Command (CausationId, CorrelationId), ICommand;
+    : Command (CausationId, CorrelationId), ICommand;
 
 public sealed class SignUpUserCommandHandler : ICommandHandler<SignUpUserCommand>
 {
-    private readonly ICreateAggregateRepository<UserAggregate> _aggregateService;
-    private readonly IReaderAggregateRepository<UserAggregate, UserPartitionKey, UserId> _readerRepository;
+    private readonly ICreateAggregate<UserAggregate> _aggregateService;
+    private readonly IReadAggregate<UserAggregate, UserPartitionKey, UserId> _readerRepository;
 
     public SignUpUserCommandHandler(
-        ICreateAggregateRepository<UserAggregate> aggregateService,
-        IReaderAggregateRepository<UserAggregate, UserPartitionKey, UserId> readerRepository)
+        ICreateAggregate<UserAggregate> aggregateService,
+        IReadAggregate<UserAggregate, UserPartitionKey, UserId> readerRepository)
     {
         _aggregateService = aggregateService;
         _readerRepository = readerRepository;
@@ -294,7 +303,6 @@ public sealed class SignUpUserCommandHandler : ICommandHandler<SignUpUserCommand
 
     public async Task HandleAsync(SignUpUserCommand command)
     {
-        // 1. Validate Business Logic
         UserPartitionKey userPartitionKey = new(command.MobileNumber);
         UserId userId = new (command.MobileNumber);
 
@@ -329,12 +337,12 @@ public sealed record UserSignedInRequestedEvent(DateTime SignInRequestedUtc, Dev
 
 public sealed class SignInCommandHandler : ICommandHandler<SignInUserCommand>
 {
-    private readonly IUpdateAggregateRepository<UserAggregate> _aggregateService;
-    private readonly IReaderAggregateRepository<UserAggregate, UserPartitionKey, UserId> _readerRepository;
+    private readonly IUpdateAggregate<UserAggregate> _aggregateService;
+    private readonly IReadAggregate<UserAggregate, UserPartitionKey, UserId> _readerRepository;
 
     public SignInCommandHandler(
-        IUpdateAggregateRepository<UserAggregate> aggregateService,
-        IReaderAggregateRepository<UserAggregate, UserPartitionKey, UserId> readerRepository)
+        IUpdateAggregate<UserAggregate> aggregateService,
+        IReadAggregate<UserAggregate, UserPartitionKey, UserId> readerRepository)
     {
         _aggregateService = aggregateService;
         _readerRepository = readerRepository;
@@ -360,7 +368,13 @@ public sealed class SignInCommandHandler : ICommandHandler<SignInUserCommand>
     }
 }
 
-public sealed record VerifySignInCommand(CausationId CausationId, CorrelationId CorrelationId, MobileNumber MobileNumber, VerificationId VerificationId, DeviceId DeviceId) 
+public sealed record VerifySignInCommand(
+    CausationId CausationId, 
+    CorrelationId CorrelationId, 
+    MobileNumber MobileNumber, 
+    VerificationId VerificationId, 
+    DeviceId DeviceId,
+    VerficationCode VerificationCode) 
     : Command (CausationId, CorrelationId), ICommand;
 
 public sealed record VerifySignInRequestedEvent(DeviceId DeviceId, VerificationId VerificationId) : IEvent<UserAggregate>
@@ -392,7 +406,7 @@ public sealed record FailedSignInEvent(DeviceId DeviceId, VerificationId Verific
     }
 }
 
-public sealed record UserLockedEvent() : IEvent<UserAggregate>
+public sealed record UserLockedEvent(DateTime LockDateTimeUtc) : IEvent<UserAggregate>
 {
     public UserAggregate Apply(UserAggregate aggregate)
     {
@@ -400,20 +414,33 @@ public sealed record UserLockedEvent() : IEvent<UserAggregate>
     }
 }
 
-public sealed class VerifySignInCommandHandler : ICommandHandler<VerifySignInCommand>
+public sealed record VerificationResponse(bool Verified);
+
+public interface IVerification {
+    Task<VerificationResponse> Verify(MobileNumber mobileNumber, VerficationCode verficationCode);
+}
+
+public sealed record Token(string Value);
+
+public sealed record VerifySignInResponse(bool IsVerified, Token? Token, string Message);
+
+public sealed class VerifySignInCommandHandler : ICommandHandler<VerifySignInCommand, VerifySignInResponse>
 {
-    private readonly IUpdateAggregateRepository<UserAggregate> _aggregateService;
-    private readonly IReaderAggregateRepository<UserAggregate, UserPartitionKey, UserId> _readerRepository;
+    private readonly IUpdateAggregate<UserAggregate> _aggregateService;
+    private readonly IReadAggregate<UserAggregate, UserPartitionKey, UserId> _readerRepository;
+    private readonly IVerification _verificationService;
 
     public VerifySignInCommandHandler(
-        IUpdateAggregateRepository<UserAggregate> aggregateService,
-        IReaderAggregateRepository<UserAggregate, UserPartitionKey, UserId> readerRepository)
+        IUpdateAggregate<UserAggregate> aggregateService,
+        IReadAggregate<UserAggregate, UserPartitionKey, UserId> readerRepository,
+        IVerification verificationService)
     {
         _aggregateService = aggregateService;
         _readerRepository = readerRepository;
+        _verificationService = verificationService;
     }
 
-    public async Task HandleAsync(VerifySignInCommand command)
+    public async Task<VerifySignInResponse> HandleAsync(VerifySignInCommand command)
     {
         UserPartitionKey userPartitionKey = new(command.MobileNumber);
         UserId userId = new (command.MobileNumber);
@@ -422,21 +449,48 @@ public sealed class VerifySignInCommandHandler : ICommandHandler<VerifySignInCom
         switch(aggregate)
         {
             case UserAggregate userAggregate:
-                await _aggregateService.SaveAsync(userAggregate, new List<IEvent<UserAggregate>> {
-                    //Success
-                    new SuccessfulSignInEvent(command.DeviceId, command.VerificationId, DateTime.UtcNow),
+                // Twilio Check
+                var verificationResponse = await _verificationService.Verify(command.MobileNumber, command.VerificationCode);
 
-                    //Failure
-                    new FailedSignInEvent(command.DeviceId, command.VerificationId, DateTime.UtcNow),
-                    new UserLockedEvent()
-                });
-                break;
+                return (verificationResponse.Verified, userAggregate) switch {
+                    (true, _) => await SuccessfullVerification(userAggregate, command.DeviceId, command.VerificationId),
+                    (false, { FailedSignInAttempts: < 10 }) => await FailedVerification(userAggregate, command.DeviceId, command.VerificationId),
+                    (false, _) => await LockAccount(userAggregate, command.DeviceId, command.VerificationId)
+                };
             default:
                 throw new InvalidOperationException();
         }
     }
-}
+ 
+    private async Task<VerifySignInResponse> SuccessfullVerification(UserAggregate userAggregate, DeviceId deviceId, VerificationId verificationId)
+    {
+        await _aggregateService.SaveAsync(userAggregate, new [] {
+            new SuccessfulSignInEvent(deviceId, verificationId, DateTime.UtcNow),
+        });
 
+        return new VerifySignInResponse(false, new (Guid.NewGuid().ToString()), string.Empty);
+    }
+
+    private async Task<VerifySignInResponse> FailedVerification(UserAggregate userAggregate, DeviceId deviceId, VerificationId verificationId)
+    {
+        await _aggregateService.SaveAsync(userAggregate,new [] {
+            new FailedSignInEvent(deviceId, verificationId, DateTime.UtcNow)
+        });
+
+        return new VerifySignInResponse(false, new (Guid.NewGuid().ToString()), "Invalid Verification Code");
+    }
+
+    private async Task<VerifySignInResponse> LockAccount(UserAggregate userAggregate, DeviceId deviceId, VerificationId verificationId)
+    {
+        var lockedDateTime = DateTime.UtcNow;
+        await _aggregateService.SaveAsync(userAggregate,new List<IEvent<UserAggregate>> {
+            new FailedSignInEvent(deviceId, verificationId, lockedDateTime),
+            new UserLockedEvent(lockedDateTime)
+        });
+
+        return new VerifySignInResponse(false, new (Guid.NewGuid().ToString()), "To many attempts, account Locked");
+    }
+}
 
 public sealed record UpdateMobileNumberCommand(CausationId CausationId, CorrelationId CorrelationId, MobileNumber MobileNumber)
     : Command (CausationId, CorrelationId), ICommand;;
@@ -444,12 +498,12 @@ public sealed record UpdateMobileNumberCommand(CausationId CausationId, Correlat
 
 public sealed class UpdateMobileNumberCommandHandler : ICommandHandler<UpdateMobileNumberCommand>
 {
-    private readonly IUpdateAggregateRepository<UserAggregate> _aggregateService;
-    private readonly IReaderAggregateRepository<UserAggregate, UserPartitionKey, UserId> _readerRepository;
+    private readonly IUpdateAggregate<UserAggregate> _aggregateService;
+    private readonly IReadAggregate<UserAggregate, UserPartitionKey, UserId> _readerRepository;
 
     public UpdateMobileNumberCommandHandler(
-        IUpdateAggregateRepository<UserAggregate> aggregateService,
-        IReaderAggregateRepository<UserAggregate, UserPartitionKey, UserId> readerRepository)
+        IUpdateAggregate<UserAggregate> aggregateService,
+        IReadAggregate<UserAggregate, UserPartitionKey, UserId> readerRepository)
     {
         _aggregateService = aggregateService;
          _readerRepository = readerRepository;
