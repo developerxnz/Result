@@ -302,8 +302,7 @@ public sealed class SignInCommandHandler : ICommandHandler<SignInUserCommand>
 {
     private readonly IEventStore<UserAggregate, UserPartitionKey, UserId> _eventStore;
 
-    public SignInCommandHandler(
-        IEventStore<UserAggregate, UserPartitionKey, UserId> eventStore)
+    public SignInCommandHandler(IEventStore<UserAggregate, UserPartitionKey, UserId> eventStore)
     {
         _eventStore = eventStore;
     }
