@@ -1,0 +1,282 @@
+#!meta
+
+{"kernelInfo":{"defaultKernelName":"csharp","items":[{"aliases":[],"languageName":"csharp","name":"csharp"}]}}
+
+#!markdown
+
+# 
+
+#!markdown
+
+# Description
+
+Just messing with different ways to restructure code using a factory.
+
+#!csharp
+
+using System.Threading;
+
+public abstract record IUserName;
+
+public sealed record MobileNumber : IUserName;
+
+public sealed record EmailAddress : IUserName;
+
+public abstract record IOneTimePassword;
+
+public sealed record TwilioOpt: IOneTimePassword;
+
+public sealed record EmailOtp : IOneTimePassword;
+
+
+public interface IVerification
+{
+
+    Task Send(IUserName Username);
+
+    Task Verify(IUserName Username, IOneTimePassword otp);
+
+}
+
+public abstract record VerificationResult;
+
+public sealed record SuccessfulVerificationResult(IUserName UserName, IOneTimePassword OneTimePassword) : VerificationResult;
+
+public sealed record UnsuccessfulVerificationResult(IUserName UserName) : VerificationResult;
+
+public interface IUser 
+{
+    Task<string> CreateUser<TUserName>(TUserName username, CancellationToken cancellationToken) where TUserName : IUserName;
+}
+
+public abstract class Provider : IUser
+{
+    public abstract Task<string> CreateUser<TUserName>(TUserName username, CancellationToken cancellationToken) where TUserName : IUserName;
+
+}
+
+public abstract class Verification
+{
+    public async Task<VerificationResult> SendAsync<TUserName>(TUserName user, CancellationToken cancellationToken) where TUserName : IUserName
+    {
+        //Before Sending
+        if(await CanSendAsync(user))
+        {
+            //Sending
+            var otp = await OnSendAsync(user);
+
+            //After Sending
+            await OnAfterSendAsync(user, otp);
+
+            return new SuccessfulVerificationResult(user, otp);
+        }
+
+        return new UnsuccessfulVerificationResult(user);
+    }
+
+    protected abstract Task<bool> CanSendAsync<TUserName>(TUserName user);
+
+    protected abstract Task<IOneTimePassword> OnSendAsync<TUserName>(TUserName user);
+
+    protected abstract Task OnAfterSendAsync<TUserName, TOneTimePassord>(TUserName user, TOneTimePassord oneTimePassord);
+
+    public abstract Task VerifyAsync<TUserName, TOneTimePassord>(TUserName user, TOneTimePassord oneTimePassord);
+}
+
+public interface IRules
+{
+
+    Task<bool> CanSendVerificationAsync<TUserName> (TUserName username);
+
+}
+
+public sealed class MobileNumberCustomerRules : IRules
+{
+    public Task<bool> CanSendVerificationAsync<MobileNumber>(MobileNumber username)
+    {
+        Console.WriteLine("Can Verify is false");
+
+        return Task.FromResult(false);
+    }
+}
+
+/*
+
+This class doesn't need to have all these functions, more an example.
+Everything could be handled via a single call.
+
+Its two jobs are
+- Sening Verification
+- Verifying OTP
+
+Nothing else!!
+
+*/
+public sealed class TwilioVerification: Verification
+{
+    private readonly IRules _rules;
+
+    public TwilioVerification(IRules rules)
+    {
+        _rules = rules;
+    }
+
+    protected override async Task<bool> CanSendAsync<MobileNumber>(MobileNumber user)
+    {
+        Console.WriteLine("Can we send verification");
+        return await _rules.CanSendVerificationAsync(user);
+    }
+
+    protected override Task<IOneTimePassword> OnSendAsync<MobileNumber>(MobileNumber Username)
+    {
+        //Actual sending via Twilio Client
+        Console.WriteLine("Sending Twilio Verification");
+        
+        return Task.FromResult<IOneTimePassword>(new TwilioOpt());
+    }
+
+    protected override Task OnAfterSendAsync<MobileNumber, TwilioOpt>(MobileNumber user, TwilioOpt oneTimePassword)
+    {
+        Console.WriteLine($"Verification Sent {oneTimePassword.GetType()}");
+        return Task.CompletedTask;
+    }
+
+    public override Task VerifyAsync<MobileNumber, TwilioOpt>(MobileNumber Username, TwilioOpt oneTimePassword)
+    {
+        Console.WriteLine("Verifying Twilio OTP");
+        return Task.CompletedTask;
+    }
+}
+
+// public sealed class EmailVerification: Verification
+// {
+//     public override Task Send<EmailAddress>(EmailAddress Username) 
+//     {
+//         Console.WriteLine("Sending Eamil Verification");
+//         return Task.CompletedTask;
+//     }
+
+//     public override Task Verify<EmailAddress, EmailOtp>(EmailAddress Username, EmailOtp oneTimePassword)
+//     {
+//         Console.WriteLine("Verifying Eamil OTP");
+//         return Task.CompletedTask;
+//     }
+// }
+
+public class VerificationFactory
+{
+    //Could potentially use keyed types with injection, would save initialising in here
+    public static Verification Create(IUserName user) => user switch {
+        MobileNumber => new TwilioVerification(new MobileNumberCustomerRules()),
+        //EmailAddress => new EmailVerification(),
+        _ => throw new InvalidOperationException()
+    };
+    
+}
+
+var firebaseMobileNumber = new MobileNumber();
+var mobileVerification  = VerificationFactory.Create(firebaseMobileNumber);
+var w = await mobileVerification.SendAsync(firebaseMobileNumber, CancellationToken.None);
+switch(w)
+{
+    case SuccessfulVerificationResult succes:
+        Console.WriteLine("Successfult");
+        break;
+    case UnsuccessfulVerificationResult unsuccessful:
+        Console.WriteLine("unsuccessful");
+        break;
+    default:
+        throw new Exception("boom");
+}
+
+var mobileOtp = new TwilioOpt();
+var x =  mobileVerification.VerifyAsync(firebaseMobileNumber, mobileOtp);
+
+// var emailAddress = new EmailAddress();
+// var emailVerification = VerificationFactory.Create(emailAddress);
+// var y = emailVerification.SendAsync(emailAddress);
+// var emailOtp = new TwilioOpt();
+// var z = emailVerification.VerifyAsync(emailAddress, emailOtp);
+
+public interface ICustomerTracking
+{
+    Task OnSignInRequested(IUserName username, CancellationToken cancellationToken);
+
+    Task OnSignInFailed(IUserName username, CancellationToken cancellationToken);
+
+    Task OnSignInSuccessful(IUserName username, CancellationToken cancellationToken);
+}
+
+public interface IAuthenticationService 
+{
+    public Task<SignInResponse> SignIn(IUserName username, CancellationToken cancellationToken);
+
+    public Task Verify(IUserName username, IOneTimePassword oneTimePassword);
+}
+
+public sealed class AuthenticationService : IAuthenticationService
+{
+    //Plugin other services for storing events etc
+    // private VerificationFactory _factory; //todo
+
+    private readonly ICustomerTracking _customer;
+
+    public AuthenticationService(ICustomerTracking customer)
+    {
+        _customer = customer;
+    }
+
+    public async Task<SignInResponse> SignIn(IUserName username, CancellationToken cancellationToken)
+    {
+        var verification = VerificationFactory.Create(username);
+
+        // Does this make sense? should it live elsewhere?
+        //Can we use events instead?
+        await _customer.OnSignInRequested(username, cancellationToken);
+
+        var result = await verification.SendAsync(username, cancellationToken);
+
+        //After Send, Verfication Sent
+        await _customer.OnSignInSuccessful(username, cancellationToken);
+        
+        //On Failure, Verification Sending Failed
+        await _customer.OnSignInFailed(username, cancellationToken);
+
+        return new SignInResponse();//todo return something?
+    }
+
+    public async Task Verify(IUserName username, IOneTimePassword oneTimePassword)
+    {
+        var factory = VerificationFactory.Create(username);
+
+        await factory.VerifyAsync(username, oneTimePassword);
+    }
+}
+
+public interface ICommand;
+public interface IResponse;
+
+public interface ICommandHandler<TCommandRequest, TCommandResponse> where TCommandRequest: ICommand where TCommandResponse : IResponse
+{
+    Task<TCommandResponse> HandleAsync(TCommandRequest command, CancellationToken cancellationToken);
+
+}
+
+public sealed record SignInCommand(MobileNumber MobileNumber) : ICommand;
+public sealed record SignInResponse: IResponse;
+public sealed class MobileNumberSignInCommandHandler : ICommandHandler<SignInCommand, SignInResponse> 
+{
+    private readonly IAuthenticationService _authenticationService;
+
+    public MobileNumberSignInCommandHandler(IAuthenticationService authenticationService)
+    {
+        _authenticationService = authenticationService;
+    }
+
+    public async Task<SignInResponse> HandleAsync(SignInCommand command, CancellationToken cancellationToken)
+    {
+        var result = await _authenticationService.SignIn(command.MobileNumber, cancellationToken);
+
+        return new SignInResponse();
+    }
+}
